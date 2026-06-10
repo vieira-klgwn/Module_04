@@ -4,8 +4,7 @@ A single-file, menu-driven C++ console application that manages a parking lot.
 It registers parking slots and vehicles, calculates parking fees on exit,
 keeps a permanent (read-only) transaction history, and reports live statistics.
 
-The project is written to be **beginner-friendly** and easy to explain during an
-oral exam defense.
+
 
 ---
 
@@ -30,7 +29,7 @@ g++ main.cpp -o parking
 ./parking
 ```
 
-Uses only the C++ standard library. No external dependencies.
+
 
 ---
 
@@ -58,8 +57,7 @@ Uses only the C++ standard library. No external dependencies.
 
 ## Data Structures Used (DSA)
 
-All storage uses a **linear data structure (`vector`)** with simple linear-search
-`for` loops — easy to read and explain in an oral defense.
+All storage uses a **linear data structure (`vector`)**
 
 | Structure | Used for |
 |-----------|----------|
@@ -114,13 +112,7 @@ never crashes the program. This uses the same `saveToFile` / `loadFromFile` +
 | Car | 1000 FRW/hour |
 | Truck | 2000 FRW/hour |
 
-> Notes:
-> - The latest brief wrote "Car: 100 FRW/hour", but that is treated as a typo
->   for **1000 FRW** (a car should not be cheaper than a 500 FRW motorcycle).
->   Change it at runtime with menu 8 if your examiner really wants 100.
-> - A truck default (2000) is included so trucks can also be billed.
 
----
 
 ## Fee Calculation (Ceiling Hours)
 
@@ -232,6 +224,9 @@ Total revenue        : 3000 FRW
 
 ```
 parking/
-├── main.cpp     # complete single-file program
-└── README.md    # this file
+├── main.cpp              # complete single-file program
+└── README.md             # this file
+└── System Diagram.png    # for this Parking Management System 
+└── transactions.txt      # File keeping the transactions 
+
 ```
