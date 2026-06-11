@@ -34,37 +34,75 @@
 #include <iomanip>
 #include <cstdlib>   // exit() for safe EOF handling
 #include <fstream>   // ofstream / ifstream for saving transactions to a file
+#include <ctime>     // time(), localtime(), mktime() for automatic date/time
+#include <cstring>   // memset() when building a tm struct
+#include <regex>     // regular-expression validation of IDs / plates / zones
 
 using namespace std;
 
 // ===========================================================================
-// CLASS: Time
-// Stores a clock time (hour + minute) and knows how to compare itself.
-// Encapsulation: hour/minute are private; we only expose safe methods.
+// CLASS: DateTime
+// Stores a FULL calendar timestamp (date + time) as a time_t.
+// The entry/exit times are now captured AUTOMATICALLY from the system clock
+// (DateTime::now()), so a vehicle can stay parked across midnight / many days
+// and the duration is still computed correctly.
+// Encapsulation: the raw timestamp is private; only safe methods are exposed.
 // ===========================================================================
-class Time {
+class DateTime {
 private:
-    int hour;
-    int minute;
+    time_t timestamp;   // seconds since the epoch (local system clock)
 
 public:
-    Time() : hour(0), minute(0) {}
-    Time(int h, int m) : hour(h), minute(m) {}
+    DateTime() : timestamp(0) {}
+    explicit DateTime(time_t t) : timestamp(t) {}
 
-    int getHour() const { return hour; }
-    int getMinute() const { return minute; }
-
-    // Convert the time to a single number of minutes (easy to compare/subtract)
-    int toMinutes() const {
-        return hour * 60 + minute;
+    // Capture the current real-world date and time from the system clock.
+    static DateTime now() {
+        return DateTime(time(nullptr));
     }
 
-    // Return a nice "HH:MM" string (adds leading zeros)
+    time_t getTimestamp() const { return timestamp; }
+
+    // Whole seconds between this moment and a later one (other - this).
+    // May span hours, days or more, which is exactly what we need.
+    long long secondsUntil(const DateTime& other) const {
+        return (long long)difftime(other.timestamp, timestamp);
+    }
+
+    // Human-readable "YYYY-MM-DD HH:MM:SS".
     string toString() const {
-        stringstream ss;
-        ss << (hour < 10 ? "0" : "") << hour << ":"
-           << (minute < 10 ? "0" : "") << minute;
-        return ss.str();
+        char buffer[20];
+        struct tm* lt = localtime(&timestamp);
+        if (lt == nullptr) return "0000-00-00 00:00:00";
+        strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", lt);
+        return string(buffer);
+    }
+
+    // Rebuild a DateTime from "YYYY-MM-DD HH:MM:SS" (used when loading the
+    // saved transactions file). Throws if the text is not a valid timestamp,
+    // which lets the loader skip header / separator / damaged rows safely.
+    static DateTime fromString(const string& text) {
+        string tmp = text;
+        for (int i = 0; i < (int)tmp.size(); i++) {
+            if (tmp[i] == '-' || tmp[i] == ':') tmp[i] = ' ';
+        }
+        stringstream ss(tmp);
+        int y, mo, d, h, mi, s;
+        if (!(ss >> y >> mo >> d >> h >> mi >> s)) {
+            throw runtime_error("bad datetime");
+        }
+        struct tm tmv;
+        memset(&tmv, 0, sizeof(tmv));
+        tmv.tm_year  = y - 1900;
+        tmv.tm_mon   = mo - 1;
+        tmv.tm_mday  = d;
+        tmv.tm_hour  = h;
+        tmv.tm_min   = mi;
+        tmv.tm_sec   = s;
+        tmv.tm_isdst = -1;            // let the system work out daylight saving
+        time_t t = mktime(&tmv);
+        if (t == (time_t)-1) throw runtime_error("bad datetime");
+        return DateTime(t);
     }
 };
 
@@ -161,21 +199,25 @@ public:
         }
     }
 
-    // Read a valid time. Accepts "HH:MM" or "HH MM".
-    static Time readTime(const string& prompt) {
+    // Does a string fully match a regular expression?
+    // Wrapped in try/catch so a bad pattern can never crash the program.
+    static bool matchesRegex(const string& value, const string& pattern) {
+        try {
+            return regex_match(value, regex(pattern));
+        } catch (const exception&) {
+            return false;
+        }
+    }
+
+    // Read a NON-EMPTY value that must fully match a regular expression.
+    // Keeps re-asking and shows the guidance message until the input is valid.
+    static string readPattern(const string& prompt,
+                              const string& pattern,
+                              const string& errorMessage) {
         while (true) {
-            string line = readLine(prompt + " (HH:MM, 24-hour): ");
-            for (int i = 0; i < (int)line.size(); i++) {
-                if (line[i] == ':') line[i] = ' ';
-            }
-            stringstream ss(line);
-            int h, m;
-            if (ss >> h >> m) {
-                if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
-                    return Time(h, m);
-                }
-            }
-            cout << "Error: Invalid time. Hour 0-23, minute 0-59.\n";
+            string value = readNonEmpty(prompt);
+            if (matchesRegex(value, pattern)) return value;
+            cout << "Error: " << errorMessage << "\n";
         }
     }
 };
@@ -221,19 +263,19 @@ class Vehicle {
 private:
     string plateNumber;       // unique while parked
     string vehicleType;
-    Time entryTime;
+    DateTime entryTime;       // captured automatically at entry
     string allocatedSlotId;   // which slot it occupies
 
 public:
     Vehicle() {}
 
-    Vehicle(string plate, string type, Time entry, string slotId)
+    Vehicle(string plate, string type, DateTime entry, string slotId)
         : plateNumber(plate), vehicleType(type),
           entryTime(entry), allocatedSlotId(slotId) {}
 
     string getPlateNumber() const { return plateNumber; }
     string getVehicleType() const { return vehicleType; }
-    Time getEntryTime() const { return entryTime; }
+    DateTime getEntryTime() const { return entryTime; }
     string getAllocatedSlotId() const { return allocatedSlotId; }
 
     void display() const {
@@ -256,8 +298,8 @@ private:
     string plateNumber;
     string vehicleType;
     string slotId;
-    Time entryTime;
-    Time exitTime;
+    DateTime entryTime;
+    DateTime exitTime;
     int hoursCharged;
     double priceUsed;     // hourly price at the moment of exit (frozen)
     double totalFee;
@@ -266,7 +308,7 @@ public:
     ParkingTransaction() : hoursCharged(0), priceUsed(0), totalFee(0) {}
 
     ParkingTransaction(string plate, string type, string slot,
-                       Time entry, Time exit, int hours,
+                       DateTime entry, DateTime exit, int hours,
                        double price, double fee)
         : plateNumber(plate), vehicleType(type), slotId(slot),
           entryTime(entry), exitTime(exit), hoursCharged(hours),
@@ -276,8 +318,8 @@ public:
     string getPlateNumber() const { return plateNumber; }
     string getVehicleType() const { return vehicleType; }
     string getSlotId() const { return slotId; }
-    Time getEntryTime() const { return entryTime; }
-    Time getExitTime() const { return exitTime; }
+    DateTime getEntryTime() const { return entryTime; }
+    DateTime getExitTime() const { return exitTime; }
     int getHoursCharged() const { return hoursCharged; }
     double getPriceUsed() const { return priceUsed; }
     double getTotalFee() const { return totalFee; }
@@ -287,8 +329,8 @@ public:
              << setw(10) << plateNumber << " | "
              << setw(11) << vehicleType << " | "
              << setw(6)  << slotId << " | "
-             << setw(6)  << entryTime.toString() << " | "
-             << setw(6)  << exitTime.toString() << " | "
+             << setw(19) << entryTime.toString() << " | "
+             << setw(19) << exitTime.toString() << " | "
              << setw(5)  << hoursCharged << " | "
              << setw(8)  << priceUsed << " | "
              << totalFee << " FRW"
@@ -381,6 +423,33 @@ private:
         }
     }
 
+    // Plate format depends on the vehicle type:
+    //   - motorcycle : R + 1 letter + 3 digits           (5 chars, e.g. RA123)
+    //   - car/truck  : R + 2 letters + 3 digits + 1 letter (7 chars, e.g. RAB123A)
+    // Letters must be UPPERCASE; no spaces or symbols are accepted.
+    bool isValidPlateForType(const string& plate, const string& type) const {
+        if (type == "motorcycle") {
+            return InputHelper::matchesRegex(plate, "^R[A-Z][0-9]{3}$");
+        }
+        // car or truck
+        return InputHelper::matchesRegex(plate, "^R[A-Z]{2}[0-9]{3}[A-Z]$");
+    }
+
+    // Read a plate number, re-prompting until it matches the type's format.
+    string readPlateForType(const string& type) {
+        string rule = (type == "motorcycle")
+            ? "Plate format for motorcycle: R + 1 letter + 3 digits, e.g. RA123 (5 UPPERCASE chars)."
+            : "Plate format for " + type +
+              ": R + 2 letters + 3 digits + 1 letter, e.g. RAB123A (7 UPPERCASE chars).";
+        while (true) {
+            cout << rule << "\n";
+            string plate = InputHelper::readNonEmpty("Enter Plate Number: ");
+            if (isValidPlateForType(plate, type)) return plate;
+            cout << "Error: Invalid plate. Use UPPERCASE letters/digits only, "
+                    "no spaces or symbols, and match the format shown above.\n";
+        }
+    }
+
     // LINEAR SEARCH: slot index by ID (-1 if missing)
     int findSlotIndexById(const string& slotId) const {
         for (int i = 0; i < (int)slots.size(); i++) {
@@ -415,9 +484,13 @@ private:
         return false;
     }
 
-    // Ceiling billing: every started hour counts as a full hour.
-    int calculateHoursCharged(int durationMinutes) const {
-        return (int)ceil(durationMinutes / 60.0);
+    // Ceiling billing: every STARTED hour counts as a full hour.
+    // Works on whole seconds so multi-day stays are handled correctly.
+    // A completed session is always charged at least one hour.
+    int calculateHoursCharged(long long durationSeconds) const {
+        if (durationSeconds <= 0) return 1;
+        int hours = (int)ceil(durationSeconds / 3600.0);
+        return hours < 1 ? 1 : hours;
     }
 
     // -------------------------------------------------------------------
@@ -432,19 +505,6 @@ private:
         }
         tokens.push_back(line);
         return tokens;
-    }
-
-    // FILE HELPER: turn "HH:MM" text back into a Time (throws if invalid)
-    Time parseTimeString(const string& text) const {
-        string tmp = text;
-        for (int i = 0; i < (int)tmp.size(); i++) {
-            if (tmp[i] == ':') tmp[i] = ' ';
-        }
-        stringstream ss(tmp);
-        int h, m;
-        if (!(ss >> h >> m)) throw runtime_error("bad time");
-        if (h < 0 || h > 23 || m < 0 || m > 59) throw runtime_error("bad time");
-        return Time(h, m);
     }
 
     // -------------------------------------------------------------------
@@ -463,14 +523,14 @@ private:
              << setw(10) << "Plate" << " | "
              << setw(11) << "Type" << " | "
              << setw(6)  << "Slot" << " | "
-             << setw(6)  << "Entry" << " | "
-             << setw(6)  << "Exit" << " | "
+             << setw(19) << "Entry" << " | "
+             << setw(19) << "Exit" << " | "
              << setw(5)  << "Hours" << " | "
              << setw(8)  << "Price/hr" << " | "
              << setw(10) << "TotalFee" << "\n";
 
         // Separator line of dashes
-        file << string(78, '-') << "\n";
+        file << string(104, '-') << "\n";
 
         // One data row per transaction
         for (int i = 0; i < (int)transactions.size(); i++) {
@@ -479,8 +539,8 @@ private:
                  << setw(10) << t.getPlateNumber() << " | "
                  << setw(11) << t.getVehicleType() << " | "
                  << setw(6)  << t.getSlotId() << " | "
-                 << setw(6)  << t.getEntryTime().toString() << " | "
-                 << setw(6)  << t.getExitTime().toString() << " | "
+                 << setw(19) << t.getEntryTime().toString() << " | "
+                 << setw(19) << t.getExitTime().toString() << " | "
                  << setw(5)  << t.getHoursCharged() << " | "
                  << setw(8)  << t.getPriceUsed() << " | "
                  << setw(10) << t.getTotalFee() << "\n";
@@ -512,8 +572,8 @@ private:
                 string plate = parts[0];
                 string type  = parts[1];
                 string slot  = parts[2];
-                Time entry   = parseTimeString(parts[3]);  // throws on header
-                Time exit    = parseTimeString(parts[4]);
+                DateTime entry = DateTime::fromString(parts[3]);  // throws on header
+                DateTime exit  = DateTime::fromString(parts[4]);
                 int hours    = stoi(parts[5]);
                 double price = stod(parts[6]);
                 double fee   = stod(parts[7]);
@@ -533,12 +593,12 @@ private:
              << setw(10) << "Plate" << " | "
              << setw(11) << "Type" << " | "
              << setw(6)  << "Slot" << " | "
-             << setw(6)  << "Entry" << " | "
-             << setw(6)  << "Exit" << " | "
+             << setw(19) << "Entry" << " | "
+             << setw(19) << "Exit" << " | "
              << setw(5)  << "Hours" << " | "
              << setw(8)  << "Price/hr" << " | "
              << "TotalFee" << "\n";
-        cout << string(78, '-') << "\n";
+        cout << string(104, '-') << "\n";
     }
 
 public:
@@ -554,7 +614,13 @@ public:
     // MENU 1: Add Parking Slot
     void addParkingSlot() {
         cout << "\n== Add Parking Slot ==\n";
-        string slotId = InputHelper::readNonEmpty("Enter Slot ID: ");
+        cout << "Slot ID format: SLOT-<number> in UPPERCASE, e.g. SLOT-1, SLOT-2 "
+                "(no spaces or symbols).\n";
+        string slotId = InputHelper::readPattern(
+            "Enter Slot ID: ",
+            "^SLOT-[1-9][0-9]*$",
+            "Invalid Slot ID. Use SLOT-<number> in UPPERCASE, e.g. SLOT-1 "
+            "(no spaces or other symbols).");
 
         if (findSlotIndexById(slotId) != -1) {
             cout << "Error: Slot ID already exists. Duplicates not allowed.\n";
@@ -562,7 +628,13 @@ public:
         }
 
         string type = readVehicleType("Enter Vehicle Type for this slot: ");
-        string zone = InputHelper::readNonEmpty("Enter Zone: ");
+
+        cout << "Zone format: 1 to 10 letters/digits only (no spaces or symbols).\n";
+        string zone = InputHelper::readPattern(
+            "Enter Zone: ",
+            "^[A-Za-z0-9]{1,10}$",
+            "Invalid Zone. Use 1 to 10 letters or digits only "
+            "(no spaces or other symbols).");
 
         slots.push_back(ParkingSlot(slotId, type, zone));
         cout << "Parking slot added successfully.\n";
@@ -596,13 +668,8 @@ public:
     // MENU 4: Register Vehicle Entry
     void registerVehicleEntry() {
         cout << "\n== Register Vehicle Entry ==\n";
-        string plate = InputHelper::readNonEmpty("Enter Plate Number: ");
 
-        if (findActiveVehicleIndexByPlate(plate) != -1) {
-            cout << "Error: This vehicle is already parked.\n";
-            return;
-        }
-
+        // Type is read first because the plate format depends on it.
         string type = readVehicleType("Enter Vehicle Type: ");
 
         if (!anySlotSupportsType(type)) {
@@ -616,13 +683,22 @@ public:
             return;
         }
 
-        Time entry = InputHelper::readTime("Enter Entry Time");
+        string plate = readPlateForType(type);
+
+        if (findActiveVehicleIndexByPlate(plate) != -1) {
+            cout << "Error: This vehicle is already parked.\n";
+            return;
+        }
+
+        // Entry time is captured AUTOMATICALLY from the system clock.
+        DateTime entry = DateTime::now();
 
         slots[slotIndex].setOccupied(true);
         string slotId = slots[slotIndex].getSlotId();
         activeVehicles.push_back(Vehicle(plate, type, entry, slotId));
 
         cout << "Vehicle parked successfully in slot " << slotId << ".\n";
+        cout << "Entry time recorded automatically: " << entry.toString() << "\n";
     }
 
     // MENU 5: Register Vehicle Exit
@@ -644,24 +720,22 @@ public:
             return;
         }
 
-        Time exit = InputHelper::readTime("Enter Exit Time");
+        // Exit time is captured AUTOMATICALLY from the system clock.
+        DateTime exitTime = DateTime::now();
 
-        int entryMinutes = vehicle.getEntryTime().toMinutes();
-        int exitMinutes = exit.toMinutes();
-
-        if (exitMinutes <= entryMinutes) {
-            cout << "Error: Exit time must be AFTER entry time.\n";
+        long long durationSeconds = vehicle.getEntryTime().secondsUntil(exitTime);
+        if (durationSeconds < 0) {
+            cout << "Error: System clock issue (exit time is before entry time).\n";
             return;
         }
 
-        int durationMinutes = exitMinutes - entryMinutes;
         double price = priceList.getPrice(vehicle.getVehicleType());
         if (price <= 0) {
             cout << "Error: No valid price set for this vehicle type.\n";
             return;
         }
 
-        int hoursCharged = calculateHoursCharged(durationMinutes);
+        int hoursCharged = calculateHoursCharged(durationSeconds);
         double totalFee = hoursCharged * price;
 
         // Create the immutable transaction record (price frozen here)
@@ -670,7 +744,7 @@ public:
             vehicle.getVehicleType(),
             vehicle.getAllocatedSlotId(),
             vehicle.getEntryTime(),
-            exit,
+            exitTime,
             hoursCharged,
             price,
             totalFee
@@ -683,11 +757,19 @@ public:
         // Persist to file so the transaction is kept for future reference
         saveTransactionsToFile();
 
+        // Break the duration down into days / hours / minutes for a clear report.
+        long long days = durationSeconds / 86400;
+        long long hrs  = (durationSeconds % 86400) / 3600;
+        long long mins = (durationSeconds % 3600) / 60;
+
         cout << "Vehicle exited successfully.\n";
-        cout << "Duration: " << durationMinutes << " minute(s)\n";
+        cout << "Entry time: " << vehicle.getEntryTime().toString() << "\n";
+        cout << "Exit time : " << exitTime.toString() << "\n";
+        cout << "Duration  : " << days << " day(s), " << hrs
+             << " hour(s), " << mins << " minute(s)\n";
         cout << "Hours charged (ceiling): " << hoursCharged << "\n";
         cout << "Price used: " << price << " FRW/hour\n";
-        cout << "Total fee: " << totalFee << " FRW\n";
+        cout << "Total fee : " << totalFee << " FRW\n";
     }
 
     // MENU 6: View Active Vehicles
